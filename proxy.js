@@ -3,87 +3,95 @@ import { Hono } from "hono";
 
 const app = new Hono();
 const port = process.env.PORT || 8000;
-const urlToProxy = process.env.PROXY_URL || "https://nyaa.si";
-const proxyRssPage = process.env.PROXY_RSS_PAGE === "true";
 
-// Function to determine if the URL is an RSS feed
-const isRssFeedUrl = (url) => {
-	const rssFeedPattern = /page=rss/; // Basic pattern to identify RSS feeds
-	return rssFeedPattern.test(url);
-};
+// Target site
+const urlToProxy = process.env.PROXY_URL || "https://nyaa.si";
 
 // Proxy handler
 app.all("*", async (c) => {
-	const url = new URL(c.req.url);
-	const targetUrl = new URL(urlToProxy + url.pathname + url.search);
+  const url = new URL(c.req.url);
+  const targetUrl = new URL(urlToProxy + url.pathname + url.search);
 
-	// Get the original request headers
-	const headers = new Headers();
-	c.req.raw.headers.forEach((value, key) => {
-		// Skip host header to avoid conflicts
-		if (key.toLowerCase() !== "host") {
-			headers.set(key, value);
-		}
-	});
+  // Copy headers
+  const headers = new Headers();
+  c.req.raw.headers.forEach((value, key) => {
+    if (key.toLowerCase() !== "host") {
+      headers.set(key, value);
+    }
+  });
 
-	// Set the correct host header for the target
-	headers.set("host", targetUrl.host);
+  // Set correct host
+  headers.set("host", new URL(urlToProxy).host);
 
-	try {
-		// Forward the request to the target server
-		const response = await fetch(targetUrl.toString(), {
-			method: c.req.method,
-			headers: headers,
-			body:
-				c.req.method !== "GET" && c.req.method !== "HEAD"
-					? c.req.raw.body
-					: undefined,
-		});
+  try {
+    const response = await fetch(targetUrl.toString(), {
+      method: c.req.method,
+      headers,
+      body:
+        c.req.method !== "GET" && c.req.method !== "HEAD"
+          ? c.req.raw.body
+          : undefined,
+      redirect: "manual",
+    });
 
-		// Get response headers
-		const responseHeaders = new Headers();
-		response.headers.forEach((value, key) => {
-			// Skip some headers that might cause issues
-			if (
-				!["content-encoding", "content-length", "transfer-encoding"].includes(
-					key.toLowerCase(),
-				)
-			) {
-				responseHeaders.set(key, value);
-			}
-		});
+    // Clean response headers
+    const responseHeaders = new Headers();
+    response.headers.forEach((value, key) => {
+      if (
+        !["content-encoding", "content-length", "transfer-encoding"].includes(
+          key.toLowerCase()
+        )
+      ) {
+        responseHeaders.set(key, value);
+      }
+    });
 
-		// Handle RSS feed URL rewriting (commented out version from original)
-		if (proxyRssPage && isRssFeedUrl(c.req.url)) {
-			const responseText = await response.text();
-			const proxiedUrl = `${url.protocol}//${c.req.header("host")}`;
-			const modifiedResponse = responseText.replaceAll(urlToProxy, proxiedUrl);
+    const contentType = response.headers.get("content-type") || "";
 
-			return new Response(modifiedResponse, {
-				status: response.status,
-				statusText: response.statusText,
-				headers: responseHeaders,
-			});
-		}
+    // Build proxied base URL dynamically
+    const proxiedHost = c.req.header("host");
+    const proxiedUrl = `${url.protocol}//${proxiedHost}`;
 
-		// For non-RSS requests, just pass through the response
-		const responseBody = await response.arrayBuffer();
+    // 🔥 Handle text-based responses (HTML, JS, JSON, XML)
+    if (
+      contentType.includes("text") ||
+      contentType.includes("json") ||
+      contentType.includes("javascript") ||
+      contentType.includes("xml")
+    ) {
+      let responseText = await response.text();
 
-		return new Response(responseBody, {
-			status: response.status,
-			statusText: response.statusText,
-			headers: responseHeaders,
-		});
-	} catch (error) {
-		console.error("Proxy error:", error);
-		return c.json({ error: "Proxy request failed" }, 500);
-	}
+      // Replace original domain with proxy domain
+      responseText = responseText
+        .replaceAll("https://nyaa.si", proxiedUrl)
+        .replaceAll("http://nyaa.si", proxiedUrl)
+        .replaceAll("nyaa.si", proxiedHost);
+
+      return new Response(responseText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
+    }
+
+    // 📦 Binary responses (images, torrents, etc.)
+    const responseBody = await response.arrayBuffer();
+
+    return new Response(responseBody, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
+  } catch (error) {
+    console.error("Proxy error:", error);
+    return c.json({ error: "Proxy request failed" }, 500);
+  }
 });
 
-// Start the server
+// Start server
 serve({
-	fetch: app.fetch,
-	port: port,
+  fetch: app.fetch,
+  port: port,
 });
 
-console.log(`Hono proxy server is running at http://localhost:${port}`);
+console.log(`🚀 Hono proxy running at http://localhost:${port}`);
